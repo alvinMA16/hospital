@@ -11,11 +11,14 @@ import {
   _decorator,
 } from "cc";
 import { WARD_MVP_MAP } from "../../configs/wardMapSample";
+import { PlacementSystem } from "../../gameplay/room/PlacementSystem";
 import { RoomMapModel } from "../../gameplay/room/RoomMapModel";
 import {
   ActorRuntimeState,
   GhostRuntimeState,
   GridCoord,
+  PlacementItemDefinition,
+  PlacementValidationResult,
   RoomRuntimeState,
   RoomOccupantKind,
 } from "../../gameplay/room/map/MapTypes";
@@ -24,17 +27,53 @@ import { BattleMapView } from "./BattleMapView";
 const { ccclass, requireComponent } = _decorator;
 
 const SETUP_DURATION = 30;
-const ACTOR_MOVE_SPEED = 4.2;
+const ACTOR_MOVE_SPEED = 3.35;
 const DOOR_MAX_HP = 8;
 const GHOST_MOVE_SPEED = 4.8;
-const GHOST_KILL_RADIUS = 0.38;
+const GHOST_KILL_RADIUS = 0.72;
 const GHOST_REPATH_INTERVAL = 0.35;
 const GHOST_ATTACK_INTERVAL = 0.75;
 const GHOST_ATTACK_DAMAGE = 1;
 const GHOST_SPAWN: GridCoord = { x: 1, y: 8 };
 const JOYSTICK_RADIUS = 56;
 const JOYSTICK_KNOB_RADIUS = 24;
+const JOYSTICK_DEAD_ZONE = 0.18;
+const JOYSTICK_RESPONSE_EXPONENT = 1.6;
+const JOYSTICK_CAPTURE_LEFT_RATIO = 0.58;
+const PLAYER_MOVE_RESPONSE = 10;
 const HOME_SCENE_NAME = "home";
+const PLAYER_BED_NEAR_RADIUS = 1.05;
+const LIE_DOWN_DISTANCE = 1.05;
+const PLAYER_START_REPAIR_POINTS = 5;
+const PLAYER_MAX_REPAIR_POINTS = 8;
+const PLAYER_REPAIR_REGEN_INTERVAL = 4.5;
+const PLAYER_REPAIR_COST = 1;
+const PLAYER_REPAIR_AMOUNT = 1;
+const CAMERA_PAN_DRAG_THRESHOLD = 4;
+
+interface PlaceableOption {
+  id: string;
+  label: string;
+  item: PlacementItemDefinition;
+}
+
+const PLACEABLE_OPTIONS: PlaceableOption[] = [
+  {
+    id: "monitor",
+    label: "监护仪",
+    item: { id: "monitor", width: 1, height: 1, blocksMovement: false },
+  },
+  {
+    id: "medicine_cart",
+    label: "药车",
+    item: { id: "medicine_cart", width: 1, height: 1, blocksMovement: true },
+  },
+  {
+    id: "screen",
+    label: "屏风",
+    item: { id: "screen", width: 1, height: 1, blocksMovement: true },
+  },
+];
 
 const AI_SPAWNS: GridCoord[] = [
   { x: 8, y: 8 },
@@ -48,6 +87,7 @@ const AI_SPAWNS: GridCoord[] = [
 @requireComponent(BattleMapView)
 export class BattleMapDebugController extends Component {
   private mapModel: RoomMapModel | null = null;
+  private placementSystem: PlacementSystem | null = null;
   private mapView: BattleMapView | null = null;
   private roomStates: RoomRuntimeState[] = [];
   private actors: ActorRuntimeState[] = [];
@@ -65,27 +105,62 @@ export class BattleMapDebugController extends Component {
   private ghostAttackTimer = 0;
   private setupCountdown = SETUP_DURATION;
   private hudLabel: Label | null = null;
+  private centerCountdownLabel: Label | null = null;
   private joystickNode: Node | null = null;
   private joystickGraphics: Graphics | null = null;
   private joystickTouchId: number | null = null;
   private joystickVector = { x: 0, y: 0 };
+  private playerMoveVector = { x: 0, y: 0 };
+  private cameraPanTouchId: number | null = null;
+  private cameraPanMoved = false;
+  private cameraPanStartUiLocation: { x: number; y: number } | null = null;
+  private lastCameraPanUiLocation: { x: number; y: number } | null = null;
+  private lieDownButtonNode: Node | null = null;
+  private repairButtonNode: Node | null = null;
+  private placementMenuNode: Node | null = null;
+  private placementMenuLabel: Label | null = null;
+  private placementOriginCell: GridCoord | null = null;
+  private placementPreview: PlacementValidationResult | null = null;
+  private placementSequence = 0;
+  private playerRepairPoints = PLAYER_START_REPAIR_POINTS;
+  private playerRepairRegenTimer = PLAYER_REPAIR_REGEN_INTERVAL;
   private isGameOver = false;
   private gameOverOverlay: Node | null = null;
 
   start(): void {
     this.mapModel = new RoomMapModel(WARD_MVP_MAP);
+    this.placementSystem = new PlacementSystem(this.mapModel);
     this.mapView = this.getComponent(BattleMapView);
     this.roomStates = this.createRoomStates();
     this.actors = this.createActors();
+    for (const room of this.roomStates) {
+      this.mapModel.setRoomFloorBuildable(room.roomId, false);
+    }
 
     this.mapView?.setMapModel(this.mapModel);
+    const player = this.getPlayerActor();
+    if (player) {
+      this.mapView?.setCameraCenter(player.x, player.y, false);
+    }
     this.mapView?.setSimulationState(this.roomStates, this.actors, this.ghostState);
     this.ensureHud();
+    this.ensureCenterCountdown();
     this.ensureJoystick();
+    this.ensureLieDownButton();
+    this.ensureRepairButton();
+    this.ensurePlacementMenu();
     this.ensureGameOverOverlay();
+    this.refreshCamera();
     this.refreshJoystick();
+    this.refreshLieDownButton();
+    this.refreshRepairButton();
     this.refreshHud();
     this.bindInput();
+    this.scheduleOnce(() => {
+      this.refreshCamera();
+      this.refreshLieDownButton();
+      this.mapView?.setSimulationState(this.roomStates, this.actors, this.ghostState);
+    }, 0);
   }
 
   onDestroy(): void {
@@ -95,7 +170,10 @@ export class BattleMapDebugController extends Component {
   update(dt: number): void {
     if (this.isGameOver) {
       this.refreshJoystick();
+      this.refreshLieDownButton();
+      this.refreshRepairButton();
       this.refreshHud();
+      this.refreshCenterCountdown();
       this.mapView?.setSimulationState(this.roomStates, this.actors, this.ghostState);
       return;
     }
@@ -103,12 +181,17 @@ export class BattleMapDebugController extends Component {
     this.setupCountdown = Math.max(0, this.setupCountdown - dt);
 
     this.updateActors(dt);
+    this.updatePlayerRepairEconomy(dt);
     this.updateGhost(dt);
     if (this.ghostState.active) {
       this.resolveGhostKills();
     }
+    this.refreshCamera();
     this.refreshJoystick();
+    this.refreshLieDownButton();
+    this.refreshRepairButton();
     this.refreshHud();
+    this.refreshCenterCountdown();
     this.mapView?.setSimulationState(this.roomStates, this.actors, this.ghostState);
   }
 
@@ -131,11 +214,15 @@ export class BattleMapDebugController extends Component {
       return;
     }
 
-    if (!this.isJoystickVisible()) {
+    if (this.isPlacementMenuOpen()) {
       return;
     }
 
-    if (this.tryCaptureJoystick(event)) {
+    if (this.isJoystickVisible() && this.tryCaptureJoystick(event)) {
+      return;
+    }
+
+    if (this.tryStartCameraPan(event)) {
       return;
     }
   }
@@ -145,7 +232,14 @@ export class BattleMapDebugController extends Component {
       return;
     }
 
+    if (this.isPlacementMenuOpen()) {
+      return;
+    }
+
     if (this.joystickTouchId === null || event.getID() !== this.joystickTouchId) {
+      if (this.cameraPanTouchId !== null && event.getID() === this.cameraPanTouchId) {
+        this.updateCameraPan(event);
+      }
       return;
     }
 
@@ -157,7 +251,7 @@ export class BattleMapDebugController extends Component {
       return;
     }
 
-    if (!this.mapView) {
+    if (this.isPlacementMenuOpen()) {
       return;
     }
 
@@ -166,25 +260,21 @@ export class BattleMapDebugController extends Component {
       return;
     }
 
+    if (this.cameraPanTouchId !== null && event.getID() === this.cameraPanTouchId) {
+      const shouldConsumeTap = this.cameraPanMoved;
+      this.clearCameraPan();
+      if (shouldConsumeTap) {
+        return;
+      }
+    }
+
     const player = this.getPlayerActor();
-    if (!player || !player.isAlive || player.isLying) {
+    if (!player || !player.isAlive) {
       return;
     }
 
-    const uiLocation = event.getUILocation();
-    const cell = this.mapView.pickCellAtUILocation(uiLocation.x, uiLocation.y);
-    if (!cell) {
-      return;
-    }
-
-    const currentRoom = player.targetRoomId ? this.getRoomById(player.targetRoomId) : null;
-    if (
-      player.canLieDown
-      && currentRoom
-      && cell.x === currentRoom.bedCell.x
-      && cell.y === currentRoom.bedCell.y
-    ) {
-      this.tryLieDown(player);
+    if (player.isLying) {
+      this.handlePlacementTap(player, event);
       return;
     }
   }
@@ -194,8 +284,16 @@ export class BattleMapDebugController extends Component {
       return;
     }
 
+    if (this.isPlacementMenuOpen()) {
+      return;
+    }
+
     if (this.joystickTouchId !== null && event.getID() === this.joystickTouchId) {
       this.clearJoystick();
+    }
+
+    if (this.cameraPanTouchId !== null && event.getID() === this.cameraPanTouchId) {
+      this.clearCameraPan();
     }
   }
 
@@ -248,9 +346,13 @@ export class BattleMapDebugController extends Component {
       actor.canLieDown = false;
     }
 
-    const moveX = this.joystickVector.x;
-    const moveY = this.joystickVector.y;
-    if (Math.abs(moveX) > 0.001 || Math.abs(moveY) > 0.001) {
+    const response = Math.min(1, PLAYER_MOVE_RESPONSE * dt);
+    this.playerMoveVector.x += (this.joystickVector.x - this.playerMoveVector.x) * response;
+    this.playerMoveVector.y += (this.joystickVector.y - this.playerMoveVector.y) * response;
+
+    const moveX = this.playerMoveVector.x;
+    const moveY = this.playerMoveVector.y;
+    if (Math.abs(moveX) > 0.01 || Math.abs(moveY) > 0.01) {
       actor.phase = "moving";
       actor.canLieDown = false;
       actor.targetRoomId = null;
@@ -333,8 +435,7 @@ export class BattleMapDebugController extends Component {
       return;
     }
 
-    const nearBed = Math.abs(actor.x - room.bedAccessCell.x) < 0.15
-      && Math.abs(actor.y - room.bedAccessCell.y) < 0.15;
+    const nearBed = this.isActorNearBed(room, actor, LIE_DOWN_DISTANCE);
     if (!nearBed) {
       return;
     }
@@ -352,7 +453,9 @@ export class BattleMapDebugController extends Component {
     actor.canLieDown = false;
 
     if (actor.kind === "player") {
+      this.mapModel?.setRoomFloorBuildable(room.roomId, true);
       this.clearJoystick();
+      this.closePlacementMenu();
     }
 
     this.resolveRoomLock(room, actor.id);
@@ -451,11 +554,25 @@ export class BattleMapDebugController extends Component {
     this.ghostRepathTimer = Math.max(0, this.ghostRepathTimer - dt);
     this.ghostAttackTimer = Math.max(0, this.ghostAttackTimer - dt);
 
+    const breachedOccupant = this.findBreachedRoomOccupant();
     const exposedTarget = this.findNearestExposedPrey();
     const sealedRoom = this.findNearestLockedRoom();
     const reachableTarget = this.findNearestReachableActor();
 
-    if (exposedTarget) {
+    if (breachedOccupant) {
+      this.ghostState.mode = "chase";
+      this.ghostState.targetActorId = breachedOccupant.id;
+      this.ghostState.targetRoomId = breachedOccupant.targetRoomId;
+
+      if (this.ghostRepathTimer <= 0 || this.ghostPath.length === 0) {
+        const path = this.findPath(
+          this.getRoundedGhostCell(),
+          this.getRoundedActorCell(breachedOccupant),
+        );
+        this.ghostPath = path ?? [];
+        this.ghostRepathTimer = GHOST_REPATH_INTERVAL;
+      }
+    } else if (exposedTarget) {
       this.ghostState.mode = "chase";
       this.ghostState.targetActorId = exposedTarget.id;
       this.ghostState.targetRoomId = null;
@@ -553,6 +670,7 @@ export class BattleMapDebugController extends Component {
 
       if (actor.kind === "player") {
         this.clearJoystick();
+        this.clearCameraPan();
         this.triggerGameOver();
       }
     }
@@ -711,6 +829,30 @@ export class BattleMapDebugController extends Component {
       if (distance < bestDistance) {
         bestDistance = distance;
         best = actor;
+      }
+    }
+
+    return best;
+  }
+
+  private findBreachedRoomOccupant(): ActorRuntimeState | null {
+    let best: ActorRuntimeState | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    for (const room of this.roomStates) {
+      if (room.isDoorClosed || !room.ownerActorId) {
+        continue;
+      }
+
+      const owner = this.actors.find((actor) => actor.id === room.ownerActorId);
+      if (!owner || !owner.isAlive) {
+        continue;
+      }
+
+      const distance = Math.hypot(this.ghostState.x - owner.x, this.ghostState.y - owner.y);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = owner;
       }
     }
 
@@ -877,6 +1019,30 @@ export class BattleMapDebugController extends Component {
     this.hudLabel = labelNode.getComponent(Label);
   }
 
+  private ensureCenterCountdown(): void {
+    let labelNode = this.node.getChildByName("CenterCountdown");
+    if (!labelNode) {
+      labelNode = new Node("CenterCountdown");
+      labelNode.layer = this.node.layer;
+      this.node.addChild(labelNode);
+      labelNode.setPosition(new Vec3(0, 40, 0));
+
+      const transform = labelNode.addComponent(UITransform);
+      transform.setContentSize(320, 180);
+
+      const label = labelNode.addComponent(Label);
+      label.fontSize = 56;
+      label.lineHeight = 66;
+      label.horizontalAlign = 1;
+      label.verticalAlign = 1;
+      label.color = new Color(15, 23, 42, 240);
+      this.centerCountdownLabel = label;
+      return;
+    }
+
+    this.centerCountdownLabel = labelNode.getComponent(Label);
+  }
+
   private refreshHud(): void {
     if (!this.hudLabel) {
       return;
@@ -889,6 +1055,7 @@ export class BattleMapDebugController extends Component {
 
     const player = this.getPlayerActor();
     const playerRoom = player?.targetRoomId ? this.getRoomById(player.targetRoomId) : null;
+    const playerDoorHp = playerRoom ? `${playerRoom.doorHp}/${playerRoom.doorMaxHp}` : "--";
     const aliveAi = this.actors.filter((actor) => actor.kind === "ai" && actor.isAlive).length;
     const settledCount = this.roomStates.filter((room) => room.isDoorClosed).length;
 
@@ -898,9 +1065,9 @@ export class BattleMapDebugController extends Component {
     } else if (player.isLying) {
       playerText = `你已躺下并锁定 ${playerRoom?.label ?? "病房"}`;
     } else if (player.canLieDown) {
-      playerText = "点击病床躺下，先躺下的人锁门";
+      playerText = "床边出现了“躺下”按钮，点击即可躺下";
     } else if (player && (Math.abs(this.joystickVector.x) > 0.01 || Math.abs(this.joystickVector.y) > 0.01)) {
-      playerText = "用左下角摇杆移动，靠近病床后点击床";
+      playerText = "用左下角摇杆移动，靠近病床后点“躺下”";
     }
 
     const ghostText = this.setupCountdown > 0
@@ -913,9 +1080,258 @@ export class BattleMapDebugController extends Component {
 
     this.hudLabel.string =
       `抢床阶段剩余: ${this.setupCountdown.toFixed(1)} 秒\n`
-      + `已锁门病房: ${settledCount}/6  AI存活: ${aliveAi}\n`
+      + `已锁门病房: ${settledCount}/6  AI存活: ${aliveAi}  护理点: ${this.playerRepairPoints}\n`
+      + `你的门血: ${playerDoorHp}\n`
       + `${playerText}\n`
       + `${ghostText}`;
+  }
+
+  private ensurePlacementMenu(): void {
+    let menuNode = this.node.getChildByName("PlacementMenu");
+    if (!menuNode) {
+      menuNode = new Node("PlacementMenu");
+      menuNode.layer = this.node.layer;
+      menuNode.active = false;
+      this.node.addChild(menuNode);
+
+      const blockerTransform = menuNode.addComponent(UITransform);
+      blockerTransform.setContentSize(960, 640);
+      const blockerGraphics = menuNode.addComponent(Graphics);
+      blockerGraphics.fillColor = new Color(15, 23, 42, 120);
+      blockerGraphics.rect(-480, -320, 960, 640);
+      blockerGraphics.fill();
+      menuNode.on(Node.EventType.TOUCH_END, this.handlePlacementMenuClose, this);
+
+      const panel = new Node("Panel");
+      panel.layer = this.node.layer;
+      menuNode.addChild(panel);
+      panel.setPosition(new Vec3(0, -10, 0));
+
+      const panelTransform = panel.addComponent(UITransform);
+      panelTransform.setContentSize(360, 300);
+      const panelGraphics = panel.addComponent(Graphics);
+      panelGraphics.fillColor = new Color(248, 250, 252, 245);
+      panelGraphics.roundRect(-180, -150, 360, 300, 22);
+      panelGraphics.fill();
+
+      const titleNode = new Node("Title");
+      titleNode.layer = this.node.layer;
+      panel.addChild(titleNode);
+      titleNode.setPosition(new Vec3(0, 105, 0));
+      const titleTransform = titleNode.addComponent(UITransform);
+      titleTransform.setContentSize(280, 52);
+      const titleLabel = titleNode.addComponent(Label);
+      titleLabel.fontSize = 24;
+      titleLabel.lineHeight = 30;
+      titleLabel.horizontalAlign = 1;
+      titleLabel.verticalAlign = 1;
+      titleLabel.color = new Color(15, 23, 42, 255);
+      titleLabel.string = "选择放置物";
+      this.placementMenuLabel = titleLabel;
+
+      let offsetY = 34;
+      for (const option of PLACEABLE_OPTIONS) {
+        const button = this.createOverlayButton(option.label, new Vec3(0, offsetY, 0));
+        button.name = `PlaceOption:${option.id}`;
+        button.on(Node.EventType.TOUCH_END, () => this.handlePlaceOption(option.id), this);
+        panel.addChild(button);
+        offsetY -= 84;
+      }
+
+      const cancelButton = this.createOverlayButton("取消", new Vec3(0, -118, 0));
+      cancelButton.on(Node.EventType.TOUCH_END, this.handlePlacementMenuClose, this);
+      panel.addChild(cancelButton);
+    }
+
+    this.placementMenuNode = menuNode;
+  }
+
+  private refreshCenterCountdown(): void {
+    if (!this.centerCountdownLabel) {
+      return;
+    }
+
+    const node = this.centerCountdownLabel.node;
+    if (this.setupCountdown <= 0) {
+      node.active = false;
+      return;
+    }
+
+    node.active = true;
+    this.centerCountdownLabel.string = `抢床倒计时\n${Math.ceil(this.setupCountdown)}`;
+  }
+
+  private ensureLieDownButton(): void {
+    let buttonNode = this.node.getChildByName("LieDownButton");
+    if (!buttonNode) {
+      buttonNode = this.createOverlayButton("躺下", new Vec3(0, 0, 0));
+      buttonNode.name = "LieDownButton";
+      buttonNode.active = false;
+      buttonNode.on(Node.EventType.TOUCH_END, this.handleLieDownPressed, this);
+      this.node.addChild(buttonNode);
+    }
+
+    this.lieDownButtonNode = buttonNode;
+  }
+
+  private refreshLieDownButton(): void {
+    if (!this.lieDownButtonNode || !this.mapView) {
+      return;
+    }
+
+    const player = this.getPlayerActor();
+    const visible = !!player
+      && player.isAlive
+      && player.canLieDown
+      && !player.isLying
+      && !this.isGameOver;
+    this.lieDownButtonNode.active = visible;
+
+    if (!visible || !player?.targetBedCell) {
+      return;
+    }
+
+    const bedPosition = this.mapView.getLocalPositionForCell(player.targetBedCell);
+    if (!bedPosition) {
+      return;
+    }
+
+    this.lieDownButtonNode.setPosition(new Vec3(
+      bedPosition.x,
+      bedPosition.y + 96,
+      0,
+    ));
+  }
+
+  private ensureRepairButton(): void {
+    let buttonNode = this.node.getChildByName("RepairButton");
+    if (!buttonNode) {
+      buttonNode = this.createOverlayButton("修门", new Vec3(250, -260, 0));
+      buttonNode.name = "RepairButton";
+      buttonNode.active = false;
+      buttonNode.on(Node.EventType.TOUCH_END, this.handleRepairPressed, this);
+      this.node.addChild(buttonNode);
+    }
+
+    this.repairButtonNode = buttonNode;
+  }
+
+  private refreshRepairButton(): void {
+    if (!this.repairButtonNode) {
+      return;
+    }
+
+    const player = this.getPlayerActor();
+    const room = player?.targetRoomId ? this.getRoomById(player.targetRoomId) : null;
+    const canRepair = !!player
+      && !!room
+      && player.isAlive
+      && player.isLying
+      && room.ownerActorId === player.id
+      && room.doorHp < room.doorMaxHp
+      && this.playerRepairPoints >= PLAYER_REPAIR_COST
+      && !this.isGameOver;
+    this.repairButtonNode.active = canRepair;
+
+    const label = this.repairButtonNode.getComponentInChildren(Label);
+    if (label) {
+      label.string = `修门\n${PLAYER_REPAIR_COST}点`;
+    }
+  }
+
+  private isPlacementMenuOpen(): boolean {
+    return this.placementMenuNode?.active ?? false;
+  }
+
+  private handlePlacementTap(actor: ActorRuntimeState, event: EventTouch): void {
+    if (!this.mapView || !this.mapModel) {
+      return;
+    }
+
+    const uiLocation = event.getUILocation();
+    const cell = this.mapView.pickCellAtUILocation(uiLocation.x, uiLocation.y);
+    if (!cell || !actor.targetRoomId) {
+      this.closePlacementMenu();
+      return;
+    }
+
+    const mapCell = this.mapModel.getCell(cell.x, cell.y);
+    if (
+      !mapCell
+      || mapCell.roomId !== actor.targetRoomId
+      || !mapCell.buildable
+      || mapCell.occupantId
+    ) {
+      this.closePlacementMenu();
+      return;
+    }
+
+    this.openPlacementMenu(cell);
+  }
+
+  private openPlacementMenu(cell: GridCoord): void {
+    if (!this.placementMenuNode) {
+      return;
+    }
+
+    if (this.placementMenuLabel) {
+      this.placementMenuLabel.string = "选择放置物";
+    }
+    this.placementOriginCell = cell;
+    this.placementPreview = {
+      ok: true,
+      cells: [cell],
+    };
+    this.mapView?.setPlacementPreview(this.placementPreview);
+    this.placementMenuNode.active = true;
+  }
+
+  private closePlacementMenu(): void {
+    this.placementOriginCell = null;
+    this.placementPreview = null;
+    this.mapView?.setPlacementPreview(null);
+    if (this.placementMenuNode) {
+      this.placementMenuNode.active = false;
+    }
+  }
+
+  private updatePlayerRepairEconomy(dt: number): void {
+    const player = this.getPlayerActor();
+    if (!player || !player.isAlive || !player.isLying) {
+      this.playerRepairRegenTimer = PLAYER_REPAIR_REGEN_INTERVAL;
+      return;
+    }
+
+    if (this.playerRepairPoints >= PLAYER_MAX_REPAIR_POINTS) {
+      this.playerRepairRegenTimer = PLAYER_REPAIR_REGEN_INTERVAL;
+      return;
+    }
+
+    this.playerRepairRegenTimer -= dt;
+    if (this.playerRepairRegenTimer > 0) {
+      return;
+    }
+
+    this.playerRepairPoints = Math.min(PLAYER_MAX_REPAIR_POINTS, this.playerRepairPoints + 1);
+    this.playerRepairRegenTimer = PLAYER_REPAIR_REGEN_INTERVAL;
+  }
+
+  private refreshCamera(): void {
+    if (!this.mapView) {
+      return;
+    }
+
+    const player = this.getPlayerActor();
+    if (!player || !player.isAlive) {
+      return;
+    }
+
+    if (!player.isLying) {
+      this.mapView.setCameraCenter(player.x, player.y, false);
+      if (this.cameraPanTouchId !== null) {
+        this.clearCameraPan();
+      }
+    }
   }
 
   private movePlayerByJoystick(actor: ActorRuntimeState, inputX: number, inputY: number, dt: number): void {
@@ -965,8 +1381,7 @@ export class BattleMapDebugController extends Component {
         continue;
       }
 
-      const nearBed = Math.abs(actor.x - room.bedAccessCell.x) < 0.2
-        && Math.abs(actor.y - room.bedAccessCell.y) < 0.2;
+      const nearBed = this.isActorNearBed(room, actor, PLAYER_BED_NEAR_RADIUS);
       if (!nearBed) {
         continue;
       }
@@ -977,6 +1392,13 @@ export class BattleMapDebugController extends Component {
       actor.phase = "at_bed";
       return;
     }
+  }
+
+  private isActorNearBed(room: RoomRuntimeState, actor: ActorRuntimeState, radius: number): boolean {
+    return Math.max(
+      Math.abs(actor.x - room.bedCell.x),
+      Math.abs(actor.y - room.bedCell.y),
+    ) <= radius;
   }
 
   private ensureJoystick(): void {
@@ -1095,11 +1517,16 @@ export class BattleMapDebugController extends Component {
       return;
     }
 
-    this.joystickGraphics.fillColor = new Color(15, 23, 42, 55);
+    const engaged = this.joystickTouchId !== null;
+    this.joystickGraphics.fillColor = engaged
+      ? new Color(15, 23, 42, 76)
+      : new Color(15, 23, 42, 30);
     this.joystickGraphics.circle(0, 0, JOYSTICK_RADIUS);
     this.joystickGraphics.fill();
 
-    this.joystickGraphics.strokeColor = new Color(148, 163, 184, 120);
+    this.joystickGraphics.strokeColor = engaged
+      ? new Color(148, 163, 184, 150)
+      : new Color(148, 163, 184, 70);
     this.joystickGraphics.lineWidth = 2;
     this.joystickGraphics.circle(0, 0, JOYSTICK_RADIUS);
     this.joystickGraphics.stroke();
@@ -1116,26 +1543,79 @@ export class BattleMapDebugController extends Component {
     return !!player && player.isAlive && !player.isLying && !this.isGameOver;
   }
 
+  private canPanCamera(): boolean {
+    const player = this.getPlayerActor();
+    return !!player && player.isAlive && player.isLying && !this.isGameOver;
+  }
+
   private tryCaptureJoystick(event: EventTouch): boolean {
-    if (!this.joystickNode || !this.joystickNode.active || this.joystickTouchId !== null) {
+    if (!this.joystickNode || !this.isJoystickVisible() || this.joystickTouchId !== null) {
       return false;
     }
 
-    const transform = this.joystickNode.getComponent(UITransform);
-    if (!transform) {
+    const rootTransform = this.node.getComponent(UITransform);
+    if (!rootTransform) {
       return false;
     }
 
     const uiLocation = event.getUILocation();
-    const local = transform.convertToNodeSpaceAR(new Vec3(uiLocation.x, uiLocation.y, 0));
-    const distance = Math.hypot(local.x, local.y);
-    if (distance > JOYSTICK_RADIUS * 1.35) {
+    const local = rootTransform.convertToNodeSpaceAR(new Vec3(uiLocation.x, uiLocation.y, 0));
+    const captureBoundaryX =
+      -rootTransform.contentSize.width * 0.5
+      + rootTransform.contentSize.width * JOYSTICK_CAPTURE_LEFT_RATIO;
+    if (local.x > captureBoundaryX) {
       return false;
     }
 
+    this.joystickNode.setPosition(new Vec3(local.x, local.y, 0));
     this.joystickTouchId = event.getID();
     this.updateJoystickVector(event);
     return true;
+  }
+
+  private tryStartCameraPan(event: EventTouch): boolean {
+    if (!this.canPanCamera() || this.cameraPanTouchId !== null) {
+      return false;
+    }
+
+    const uiLocation = event.getUILocation();
+    this.cameraPanTouchId = event.getID();
+    this.cameraPanMoved = false;
+    this.cameraPanStartUiLocation = { x: uiLocation.x, y: uiLocation.y };
+    this.lastCameraPanUiLocation = { x: uiLocation.x, y: uiLocation.y };
+    return true;
+  }
+
+  private updateCameraPan(event: EventTouch): void {
+    if (!this.mapView || !this.lastCameraPanUiLocation) {
+      return;
+    }
+
+    const uiLocation = event.getUILocation();
+    const previousUiLocation = this.lastCameraPanUiLocation;
+    const deltaX = uiLocation.x - this.lastCameraPanUiLocation.x;
+    const deltaY = uiLocation.y - this.lastCameraPanUiLocation.y;
+    if (
+      !this.cameraPanMoved
+      && this.cameraPanStartUiLocation
+      && Math.hypot(
+        uiLocation.x - this.cameraPanStartUiLocation.x,
+        uiLocation.y - this.cameraPanStartUiLocation.y,
+      ) >= CAMERA_PAN_DRAG_THRESHOLD
+    ) {
+      this.cameraPanMoved = true;
+    }
+
+    this.lastCameraPanUiLocation = { x: uiLocation.x, y: uiLocation.y };
+
+    if (!this.cameraPanMoved) {
+      return;
+    }
+
+    this.mapView.panCameraByScreenDelta(
+      uiLocation.x - previousUiLocation.x,
+      uiLocation.y - previousUiLocation.y,
+    );
   }
 
   private updateJoystickVector(event: EventTouch): void {
@@ -1160,8 +1640,15 @@ export class BattleMapDebugController extends Component {
     }
 
     const clamped = Math.min(distance, JOYSTICK_RADIUS);
-    this.joystickVector.x = (local.x / distance) * (clamped / JOYSTICK_RADIUS);
-    this.joystickVector.y = (local.y / distance) * (clamped / JOYSTICK_RADIUS);
+    const normalizedDistance = clamped / JOYSTICK_RADIUS;
+    const adjustedDistance = normalizedDistance <= JOYSTICK_DEAD_ZONE
+      ? 0
+      : Math.pow(
+        (normalizedDistance - JOYSTICK_DEAD_ZONE) / (1 - JOYSTICK_DEAD_ZONE),
+        JOYSTICK_RESPONSE_EXPONENT,
+      );
+    this.joystickVector.x = (local.x / distance) * adjustedDistance;
+    this.joystickVector.y = (local.y / distance) * adjustedDistance;
     this.refreshJoystick();
   }
 
@@ -1169,7 +1656,90 @@ export class BattleMapDebugController extends Component {
     this.joystickTouchId = null;
     this.joystickVector.x = 0;
     this.joystickVector.y = 0;
+    this.playerMoveVector.x = 0;
+    this.playerMoveVector.y = 0;
+    if (this.joystickNode) {
+      this.joystickNode.setPosition(new Vec3(-280, -260, 0));
+    }
     this.refreshJoystick();
+  }
+
+  private clearCameraPan(): void {
+    this.cameraPanTouchId = null;
+    this.cameraPanMoved = false;
+    this.cameraPanStartUiLocation = null;
+    this.lastCameraPanUiLocation = null;
+  }
+
+  private handleLieDownPressed(event?: EventTouch): void {
+    const player = this.getPlayerActor();
+    if (!player || !player.isAlive || player.isLying || !player.canLieDown) {
+      return;
+    }
+
+    this.tryLieDown(player);
+    this.refreshLieDownButton();
+  }
+
+  private handlePlaceOption(optionId: string): void {
+    if (!this.placementSystem || !this.placementOriginCell) {
+      return;
+    }
+
+    const option = PLACEABLE_OPTIONS.find((entry) => entry.id === optionId);
+    if (!option) {
+      return;
+    }
+
+    const result = this.placementSystem.placeItem(
+      option.item,
+      this.placementOriginCell.x,
+      this.placementOriginCell.y,
+      `${option.id}_${this.placementSequence}`,
+    );
+    if (result.ok) {
+      this.placementSequence += 1;
+      this.closePlacementMenu();
+      return;
+    }
+
+    this.placementPreview = result;
+    this.mapView?.setPlacementPreview(result);
+    if (this.placementMenuLabel) {
+      this.placementMenuLabel.string = "这个位置不能放";
+    }
+  }
+
+  private handlePlacementMenuClose(): void {
+    if (this.placementMenuLabel) {
+      this.placementMenuLabel.string = "选择放置物";
+    }
+    this.closePlacementMenu();
+  }
+
+  private handleRepairPressed(): void {
+    const player = this.getPlayerActor();
+    const room = player?.targetRoomId ? this.getRoomById(player.targetRoomId) : null;
+    if (
+      !player
+      || !room
+      || !player.isAlive
+      || !player.isLying
+      || room.ownerActorId !== player.id
+      || this.playerRepairPoints < PLAYER_REPAIR_COST
+      || room.doorHp >= room.doorMaxHp
+    ) {
+      return;
+    }
+
+    this.playerRepairPoints -= PLAYER_REPAIR_COST;
+    room.doorHp = Math.min(room.doorMaxHp, room.doorHp + PLAYER_REPAIR_AMOUNT);
+    if (room.doorHp > 0) {
+      room.isDoorClosed = true;
+    }
+
+    this.refreshRepairButton();
+    this.refreshHud();
   }
 
   private triggerGameOver(): void {
@@ -1178,7 +1748,9 @@ export class BattleMapDebugController extends Component {
     }
 
     this.isGameOver = true;
+    this.closePlacementMenu();
     this.clearJoystick();
+    this.clearCameraPan();
     if (this.gameOverOverlay) {
       this.gameOverOverlay.active = true;
     }

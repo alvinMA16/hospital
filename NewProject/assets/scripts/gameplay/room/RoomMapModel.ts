@@ -129,6 +129,16 @@ export class RoomMapModel {
     return result;
   }
 
+  setRoomFloorBuildable(roomId: string, buildable: boolean): void {
+    this.forEachCell((cell) => {
+      if (cell.roomId !== roomId || cell.tileType !== "floor") {
+        return;
+      }
+
+      cell.buildable = buildable;
+    });
+  }
+
   private toIndex(x: number, y: number): number {
     return y * this.width + x;
   }
