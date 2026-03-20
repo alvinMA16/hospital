@@ -57,3 +57,83 @@ export interface PlacementValidationResult {
   blockedCell?: GridCoord;
   cells: GridCoord[];
 }
+
+export interface DoorRuntimeState {
+  roomId: string;
+  cell: GridCoord;
+  maxHp: number;
+  hp: number;
+}
+
+export interface WatcherRenderState {
+  x: number;
+  y: number;
+  targetRoomId: string | null;
+  isAttacking: boolean;
+}
+
+export type RoomOccupantKind = "empty" | "player" | "ai";
+
+export interface RoomRuntimeState {
+  roomId: string;
+  label: string;
+  owner: RoomOccupantKind;
+  ownerActorId: string | null;
+  bounds: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  bedCell: GridCoord;
+  doorCell: GridCoord;
+  bedAccessCell: GridCoord;
+  isDoorClosed: boolean;
+  doorMaxHp: number;
+  doorHp: number;
+}
+
+export interface PlayerRenderState {
+  x: number;
+  y: number;
+  assignedRoomId: string | null;
+  isLying: boolean;
+  canLieDown: boolean;
+}
+
+export type ActorKind = "player" | "ai";
+
+export type ActorPhase =
+  | "idle"
+  | "moving"
+  | "at_bed"
+  | "lying"
+  | "ejected"
+  | "dead";
+
+export interface ActorRuntimeState {
+  id: string;
+  label: string;
+  kind: ActorKind;
+  x: number;
+  y: number;
+  targetRoomId: string | null;
+  targetBedCell: GridCoord | null;
+  path: GridCoord[];
+  phase: ActorPhase;
+  isAlive: boolean;
+  isLying: boolean;
+  canLieDown: boolean;
+  thinkCooldown: number;
+  ejectedCooldown: number;
+  interactCooldown: number;
+}
+
+export interface GhostRuntimeState {
+  active: boolean;
+  x: number;
+  y: number;
+  targetActorId: string | null;
+  targetRoomId: string | null;
+  mode: "inactive" | "patrol" | "chase" | "attack_door";
+}

@@ -3,6 +3,7 @@ import {
   MapCellState,
   MapDefinition,
   PlacementOccupancy,
+  TileType,
 } from "./map/MapTypes";
 
 export class RoomMapModel {
@@ -98,6 +99,30 @@ export class RoomMapModel {
     this.forEachCell((cell) => {
       if (cell.occupantId) {
         result.push({ x: cell.x, y: cell.y });
+      }
+    });
+
+    return result;
+  }
+
+  getCellsByTileType(tileType: TileType): MapCellState[] {
+    const result: MapCellState[] = [];
+
+    this.forEachCell((cell) => {
+      if (cell.tileType === tileType) {
+        result.push(cell);
+      }
+    });
+
+    return result;
+  }
+
+  getCellsByRoomId(roomId: string): MapCellState[] {
+    const result: MapCellState[] = [];
+
+    this.forEachCell((cell) => {
+      if (cell.roomId === roomId) {
+        result.push(cell);
       }
     });
 
