@@ -86,8 +86,10 @@ export interface RoomRuntimeState {
     height: number;
   };
   bedCell: GridCoord;
+  bedLevel: number;
   doorCell: GridCoord;
   bedAccessCell: GridCoord;
+  doorLevel: number;
   isDoorClosed: boolean;
   doorMaxHp: number;
   doorHp: number;
@@ -133,7 +135,33 @@ export interface GhostRuntimeState {
   active: boolean;
   x: number;
   y: number;
+  maxHp: number;
+  hp: number;
   targetActorId: string | null;
   targetRoomId: string | null;
   mode: "inactive" | "patrol" | "chase" | "attack_door";
+}
+
+export interface PlacedStructureRuntimeState {
+  instanceId: string;
+  optionId: string;
+  level: number;
+  roomId: string;
+  origin: GridCoord;
+}
+
+export interface UpgradePulseState {
+  cell: GridCoord;
+  kind: "bed" | "door";
+  ttl: number;
+  duration: number;
+}
+
+export interface AttackEffectState {
+  kind: "pill" | "shock";
+  sourceCell: GridCoord;
+  targetX: number;
+  targetY: number;
+  ttl: number;
+  duration: number;
 }
